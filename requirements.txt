@@ -1,7 +1,7 @@
-flask
-flask-cors
-numpy
-pillow
-tensorflow
-psutil
-gunicorn
+flask==2.3.3
+flask-cors==4.0.0
+numpy==1.23.5
+pillow==9.5.0
+tensorflow==2.12.0
+psutil==5.9.8
+gunicorn==21.2.0
