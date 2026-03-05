@@ -29,8 +29,7 @@ app = Flask(__name__)
 CORS(app, resources={r"/api/*": {"origins": "*"}}) 
 
 # Configuration
-MODEL_PATH = os.path.join(os.path.dirname(__file__), "best_model.h5")
-
+MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "best_model.h5")
 DEFAULT_INPUT_SIZE = (224, 224)
 CLASS_NAMES = ("NORMAL", "DEFECT")
 
@@ -175,4 +174,3 @@ if __name__ == "__main__":
     # Use PORT environment variable for Render deployment
     port = int(os.environ.get("PORT", 8000))
     app.run(host="0.0.0.0", port=port, debug=False)
-
