@@ -11,17 +11,22 @@ from datetime import datetime
 # ── TensorFlow / Keras (graceful degradation) ─────────────────────────────────
 try:
     os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
-    from tensorflow.keras.models import load_model as _load_model          # type: ignore
-    from tensorflow.keras.preprocessing import image as _keras_image       # type: ignore
+    import tensorflow as tf
+    _load_model = tf.keras.models.load_model
+    _keras_image = tf.keras.preprocessing.image
+    from tensorflow.keras.layers import InputLayer as _InputLayer
     _TF_AVAILABLE = True
 except Exception:
     try:
-        from keras.models import load_model as _load_model                 # type: ignore
-        from keras.preprocessing import image as _keras_image             # type: ignore
+        import keras as _k
+        _load_model = _k.models.load_model
+        _keras_image = _k.preprocessing.image
+        from keras.layers import InputLayer as _InputLayer
         _TF_AVAILABLE = True
     except Exception:
         _load_model = None       # type: ignore
         _keras_image = None      # type: ignore
+        _InputLayer = None       # type: ignore
         _TF_AVAILABLE = False
 
 app = Flask(__name__)
@@ -62,14 +67,16 @@ def load_model_internal():
 
     try:
         # standard fix for Keras 3 vs 2 deserialization errors
-        from keras.layers import InputLayer
-        custom_objects = {"InputLayer": InputLayer}
+        # We explicitly map InputLayer to ensure H5 files load correctly
+        custom_objects = {}
+        if _InputLayer is not None:
+            custom_objects["InputLayer"] = _InputLayer
         
         # Load without compilation for speed and stability
         _model = _load_model(MODEL_PATH, compile=False, custom_objects=custom_objects)
         _model_loaded = True
         _load_error = None
-        print("[+] Model loaded successfully with custom objects.")
+        print("[+] Model loaded successfully with custom objects mapping.")
     except Exception as e:
         _load_error = f"Keras load_model failed: {str(e)}"
         print(f"[!] {_load_error}")
