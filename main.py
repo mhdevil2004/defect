@@ -25,11 +25,11 @@ except Exception:
         _TF_AVAILABLE = False
 
 app = Flask(__name__)
-# Production CORS: explicitly support Capacitor origins (localhost, capacitor://, etc.)
+# Permissive CORS for broad mobile compatibility
 CORS(app, resources={r"/api/*": {
-    "origins": ["*", "http://localhost", "capacitor://localhost"],
+    "origins": "*",
     "methods": ["GET", "POST", "OPTIONS", "DELETE"],
-    "allow_headers": ["Content-Type", "Authorization"]
+    "allow_headers": ["Content-Type", "Authorization", "X-Requested-With"]
 }}) 
 
 # Configuration
@@ -48,12 +48,12 @@ def load_model_internal():
     
     print(f"[*] Loading model from {MODEL_PATH}...")
     if not _TF_AVAILABLE or _load_model is None:
-        print("[!] TensorFlow/Keras not available. Running in DEMO mode.")
+        print("[!] TensorFlow/Keras not available.")
         _model_loaded = True
         return None
 
     if not os.path.exists(MODEL_PATH):
-        print(f"[!] Model file not found at {MODEL_PATH}. Running in DEMO mode.")
+        print(f"[!] Model file not found at {MODEL_PATH}.")
         _model_loaded = True
         return None
 
@@ -63,7 +63,7 @@ def load_model_internal():
         _model_loaded = True
         print("[+] Model loaded successfully.")
     except Exception as e:
-        print(f"[!] Forceful load failure: {e}. Falling back to DEMO mode.")
+        print(f"[!] Forceful load failure: {e}.")
         _model = None
         _model_loaded = True
     
@@ -80,17 +80,7 @@ def _preprocess(image, target_size):
     arr = arr / 255.0
     return np.expand_dims(arr, axis=0)
 
-def _demo_predict(image):
-    arr = np.array(image.convert("RGB"), dtype=np.float32)
-    brightness = float(np.mean(arr))
-    noise = float(np.std(arr))
-    defect_score = 0.0
-    if brightness < 60 or brightness > 215:
-        defect_score += 0.45
-    if noise > 70:
-        defect_score += 0.35
-    defect_score = float(min(max(defect_score + np.random.uniform(-0.05, 0.05), 0.01), 0.99))
-    return {"NORMAL": round(1 - defect_score, 4), "DEFECT": round(defect_score, 4)}
+# Removed _demo_predict to avoid any fake data generation
 
 @app.route("/api/detect", methods=["POST"])
 def detect():
@@ -106,11 +96,14 @@ def detect():
         img = Image.open(io.BytesIO(img_bytes))
         
         model = load_model_internal()
-        demo_mode = model is None
+        if model is None:
+            return jsonify({
+                "error": "Production model is not available. Connectivity confirmed, but engine is offline.",
+                "status": "fail",
+                "demo_mode_disabled": True
+            }), 503
 
-        if demo_mode:
-            probs = _demo_predict(img)
-        else:
+        try:
             try:
                 shape = model.input_shape
                 target = (shape[1], shape[2])
@@ -126,16 +119,19 @@ def detect():
             else:
                 probs = {CLASS_NAMES[i]: round(float(raw[0, i]), 4) for i in range(len(CLASS_NAMES))}
 
-        defect_p = probs.get("DEFECT", 0.0)
-        prediction = "defect_detected" if defect_p >= 0.5 else "normal"
-        
-        print(f"[+] Prediction: {prediction} ({probs})")
-        return jsonify({
-            "prediction": prediction,
-            "confidence": round(float(defect_p if prediction == "defect_detected" else probs.get("NORMAL", 1-defect_p)), 2),
-            "status": "success",
-            "timestamp": datetime.now().isoformat()
-        })
+            defect_p = probs.get("DEFECT", 0.0)
+            prediction = "defect_detected" if defect_p >= 0.5 else "normal"
+            
+            print(f"[+] Prediction: {prediction} ({probs})")
+            return jsonify({
+                "prediction": prediction,
+                "confidence": round(float(defect_p if prediction == "defect_detected" else probs.get("NORMAL", 1-defect_p)), 2),
+                "status": "success",
+                "timestamp": datetime.now().isoformat()
+            })
+        except Exception as inner_e:
+            print(f"[!] Inner prediction failure: {inner_e}")
+            return jsonify({"error": f"Inference engine failure: {str(inner_e)}"}), 500
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
