@@ -7,6 +7,7 @@ import numpy as np
 from PIL import Image
 import uuid
 from datetime import datetime
+import threading
 
 # ── TensorFlow / Keras (graceful degradation) ─────────────────────────────────
 try:
@@ -51,15 +52,21 @@ CLASS_NAMES = ("NORMAL", "DEFECT")
 
 # Global State
 _model = None
+_model_loading = False
 _model_loaded = False
 _load_error = None
+_state_lock = threading.Lock()
 
 def load_model_internal():
-    global _model, _model_loaded, _load_error
-    if _model_loaded:
-        return _model
+    global _model, _model_loaded, _load_error, _model_loading
+    with _state_lock:
+        if _model_loaded and _model:
+            return _model
+        if _model_loading:
+            return None
+        _model_loading = True
     
-    print(f"[*] Loading model from {MODEL_PATH}...")
+    print(f"[*] Loading model from {MODEL_PATH} (Async)...")
     if not _TF_AVAILABLE or _load_model is None:
         _load_error = "TensorFlow/Keras environment not detected. Check requirements.txt."
         print(f"[!] {_load_error}")
@@ -94,7 +101,9 @@ def load_model_internal():
         _load_error = f"Keras load_model final failure: {str(e)}"
         print(f"[!] {_load_error}")
         _model = None
-        _model_loaded = False # Reset so we can retry if it was a transient error
+        _model_loaded = False 
+    finally:
+        _model_loading = False
     
     return _model
 
@@ -134,13 +143,28 @@ def detect():
             }), 503
 
         try:
+            # Flexible input shape detection
             try:
-                shape = model.input_shape
-                target = (shape[1], shape[2])
-            except:
+                # Try getting shape from model or its first layer
+                in_shape = getattr(model, "input_shape", None)
+                if not in_shape or not isinstance(in_shape, (list, tuple)) or len(in_shape) < 3:
+                     in_shape = model.layers[0].input_shape
+                
+                # Extract W/H (handles [None, H, W, C] or [H, W, C])
+                if len(in_shape) == 4:
+                    target = (in_shape[1], in_shape[2])
+                else:
+                    target = (in_shape[0], in_shape[1])
+                
+                # Final safety check for None values
+                if None in target or not all(isinstance(v, int) for v in target):
+                    target = DEFAULT_INPUT_SIZE
+            except Exception as shape_e:
+                print(f"[*] Fallback to default size: {shape_e}")
                 target = DEFAULT_INPUT_SIZE
             
             arr = _preprocess(img, target)
+            print(f"[*] Running inference on shape: {arr.shape}")
             raw = model.predict(arr, verbose=0)
             
             if raw.ndim == 2 and raw.shape[1] == 1:
@@ -168,13 +192,17 @@ def detect():
 
 @app.route("/api/health", methods=["GET"])
 def health():
-    load_model_internal()
+    # Only try loading if not already loaded and not currently loading
+    if not _model and not _model_loading:
+        threading.Thread(target=load_model_internal, daemon=True).start()
+    
     return jsonify({
-        "status": "ok" if _model else "error",
+        "status": "ready" if _model else ("loading" if _model_loading else "error"),
         "model_loaded": _model is not None,
+        "is_loading": _model_loading,
         "load_error": _load_error,
         "demo_mode": False,
-        "version": "3.1.5",
+        "version": "4.0.0",
         "uptime_seconds": time.time() - os.path.getmtime(__file__)
     })
 
@@ -202,7 +230,9 @@ def history():
     return jsonify([])
 
 if __name__ == "__main__":
-    load_model_internal()
+    # Start loading in background to avoid blocking server start
+    threading.Thread(target=load_model_internal).start()
+    
     # Use PORT environment variable for Render deployment
     port = int(os.environ.get("PORT", 8000))
     app.run(host="0.0.0.0", port=port, debug=False)
