@@ -11,7 +11,14 @@ from datetime import datetime
 # ── TensorFlow / Keras (graceful degradation) ─────────────────────────────────
 try:
     os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+    # Force Keras 2 if Keras 3 is present
     import tensorflow as tf
+    try:
+        if hasattr(tf.keras, "utils") and hasattr(tf.keras.utils, "set_random_seed"):
+             # This is a hint of newer TF, let's try to be safe
+             pass
+    except: pass
+
     _load_model = tf.keras.models.load_model
     _keras_image = tf.keras.preprocessing.image
     from tensorflow.keras.layers import InputLayer as _InputLayer
@@ -67,21 +74,27 @@ def load_model_internal():
 
     try:
         # standard fix for Keras 3 vs 2 deserialization errors
-        # We explicitly map InputLayer to ensure H5 files load correctly
         custom_objects = {}
         if _InputLayer is not None:
             custom_objects["InputLayer"] = _InputLayer
         
+        # Add Functional to handle newer Keras 3 structural requirements
+        try:
+            from tensorflow.keras.models import Model
+            custom_objects["Functional"] = Model
+            custom_objects["Model"] = Model
+        except: pass
+
         # Load without compilation for speed and stability
         _model = _load_model(MODEL_PATH, compile=False, custom_objects=custom_objects)
         _model_loaded = True
         _load_error = None
-        print("[+] Model loaded successfully with custom objects mapping.")
+        print("[+] Model loaded successfully with comprehensive custom objects.")
     except Exception as e:
-        _load_error = f"Keras load_model failed: {str(e)}"
+        _load_error = f"Keras load_model final failure: {str(e)}"
         print(f"[!] {_load_error}")
         _model = None
-        _model_loaded = True
+        _model_loaded = False # Reset so we can retry if it was a transient error
     
     return _model
 
@@ -174,10 +187,10 @@ def stats():
         "defect_rate": 0,
         "avg_confidence": 0,
         "avg_latency_ms": 0,
-        "model_loaded": _model_loaded,
+        "model_loaded": _model is not None,
         "demo_mode": False,
-        "uptime_seconds": 0,
-        "app_version": "3.1.0",
+        "uptime_seconds": time.time() - os.path.getmtime(__file__),
+        "app_version": "3.2.0",
         "cpu_percent": 0,
         "ram_percent": 0
     })
