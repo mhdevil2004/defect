@@ -61,11 +61,15 @@ def load_model_internal():
         return None
 
     try:
-        # Load without compilation for speed
-        _model = _load_model(MODEL_PATH, compile=False)
+        # standard fix for Keras 3 vs 2 deserialization errors
+        from keras.layers import InputLayer
+        custom_objects = {"InputLayer": InputLayer}
+        
+        # Load without compilation for speed and stability
+        _model = _load_model(MODEL_PATH, compile=False, custom_objects=custom_objects)
         _model_loaded = True
         _load_error = None
-        print("[+] Model loaded successfully.")
+        print("[+] Model loaded successfully with custom objects.")
     except Exception as e:
         _load_error = f"Keras load_model failed: {str(e)}"
         print(f"[!] {_load_error}")
