@@ -14,10 +14,10 @@ try:
     os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
     # Force Keras 2 if Keras 3 is present
     import tensorflow as tf
+    # Limit memory and CPU usage for Render free tier
     try:
-        if hasattr(tf.keras, "utils") and hasattr(tf.keras.utils, "set_random_seed"):
-             # This is a hint of newer TF, let's try to be safe
-             pass
+        tf.config.threading.set_intra_op_parallelism_threads(1)
+        tf.config.threading.set_inter_op_parallelism_threads(1)
     except: pass
 
     _load_model = tf.keras.models.load_model
@@ -39,11 +39,15 @@ except Exception:
 
 app = Flask(__name__)
 # Permissive CORS for broad mobile compatibility
-CORS(app, resources={r"/api/*": {
-    "origins": "*",
-    "methods": ["GET", "POST", "OPTIONS", "DELETE"],
-    "allow_headers": ["Content-Type", "Authorization", "X-Requested-With"]
-}}) 
+CORS(app) 
+
+@app.route("/")
+def index():
+    return jsonify({
+        "message": "DefectVision API is active",
+        "engine_status": "ready" if _model else ("loading" if _model_loading else "offline"),
+        "version": "4.1.0"
+    }), 200
 
 # Configuration
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "best_model.h5")
@@ -133,12 +137,15 @@ def detect():
         img_bytes = file.read()
         img = Image.open(io.BytesIO(img_bytes))
         
+        if not _model and not _model_loading:
+            threading.Thread(target=load_model_internal, daemon=True).start()
+
         model = load_model_internal()
         if model is None:
             return jsonify({
-                "error": "Engine Offline",
-                "details": _load_error or "Unknown initialization error",
-                "status": "fail",
+                "error": "Engine Starting",
+                "details": "The AI engine is currently initializing in the background. Please wait ~1 minute.",
+                "status": "loading",
                 "demo_mode_disabled": True
             }), 503
 
