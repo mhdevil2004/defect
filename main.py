@@ -43,7 +43,7 @@ _model_loaded = False
 _load_error = None
 
 def load_model_internal():
-    global _model, _model_loaded
+    global _model, _model_loaded, _load_error
     if _model_loaded:
         return _model
     
