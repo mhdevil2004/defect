@@ -25,8 +25,12 @@ except Exception:
         _TF_AVAILABLE = False
 
 app = Flask(__name__)
-# In production, you might want to restrict this to your Vercel domain
-CORS(app, resources={r"/api/*": {"origins": "*"}}) 
+# Production CORS: explicitly support Capacitor origins (localhost, capacitor://, etc.)
+CORS(app, resources={r"/api/*": {
+    "origins": ["*", "http://localhost", "capacitor://localhost"],
+    "methods": ["GET", "POST", "OPTIONS", "DELETE"],
+    "allow_headers": ["Content-Type", "Authorization"]
+}}) 
 
 # Configuration
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "best_model.h5")
@@ -125,6 +129,7 @@ def detect():
         defect_p = probs.get("DEFECT", 0.0)
         prediction = "defect_detected" if defect_p >= 0.5 else "normal"
         
+        print(f"[+] Prediction: {prediction} ({probs})")
         return jsonify({
             "prediction": prediction,
             "confidence": round(float(defect_p if prediction == "defect_detected" else probs.get("NORMAL", 1-defect_p)), 2),
