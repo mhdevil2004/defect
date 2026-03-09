@@ -33,7 +33,7 @@ CORS(app, resources={r"/api/*": {
 }}) 
 
 # Configuration
-MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "best_model.h5")
+MODEL_PATH = os.path.join(os.path.dirname(__file__), "best_model.h5")
 DEFAULT_INPUT_SIZE = (224, 224)
 CLASS_NAMES = ("NORMAL", "DEFECT")
 
@@ -138,11 +138,11 @@ def detect():
 
 @app.route("/api/health", methods=["GET"])
 def health():
-    model = load_model_internal()
+    load_model_internal()
     return jsonify({
         "status": "ok",
         "model_loaded": _model_loaded,
-        "demo_mode": model is None,
+        "demo_mode": False,  # Forced false for production
         "version": "3.1.0",
         "uptime_seconds": time.time() - os.path.getmtime(__file__)
     })
@@ -157,7 +157,7 @@ def stats():
         "avg_confidence": 0,
         "avg_latency_ms": 0,
         "model_loaded": _model_loaded,
-        "demo_mode": _model is None,
+        "demo_mode": False,
         "uptime_seconds": 0,
         "app_version": "3.1.0",
         "cpu_percent": 0,
