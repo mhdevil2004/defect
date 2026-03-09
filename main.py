@@ -40,6 +40,7 @@ CLASS_NAMES = ("NORMAL", "DEFECT")
 # Global State
 _model = None
 _model_loaded = False
+_load_error = None
 
 def load_model_internal():
     global _model, _model_loaded
@@ -48,12 +49,14 @@ def load_model_internal():
     
     print(f"[*] Loading model from {MODEL_PATH}...")
     if not _TF_AVAILABLE or _load_model is None:
-        print("[!] TensorFlow/Keras not available.")
+        _load_error = "TensorFlow/Keras environment not detected. Check requirements.txt."
+        print(f"[!] {_load_error}")
         _model_loaded = True
         return None
 
     if not os.path.exists(MODEL_PATH):
-        print(f"[!] Model file not found at {MODEL_PATH}.")
+        _load_error = f"Model file missing at {MODEL_PATH}. Current Dir: {os.getcwd()}"
+        print(f"[!] {_load_error}")
         _model_loaded = True
         return None
 
@@ -61,9 +64,11 @@ def load_model_internal():
         # Load without compilation for speed
         _model = _load_model(MODEL_PATH, compile=False)
         _model_loaded = True
+        _load_error = None
         print("[+] Model loaded successfully.")
     except Exception as e:
-        print(f"[!] Forceful load failure: {e}.")
+        _load_error = f"Keras load_model failed: {str(e)}"
+        print(f"[!] {_load_error}")
         _model = None
         _model_loaded = True
     
@@ -98,7 +103,8 @@ def detect():
         model = load_model_internal()
         if model is None:
             return jsonify({
-                "error": "Production model is not available. Connectivity confirmed, but engine is offline.",
+                "error": "Engine Offline",
+                "details": _load_error or "Unknown initialization error",
                 "status": "fail",
                 "demo_mode_disabled": True
             }), 503
@@ -140,10 +146,11 @@ def detect():
 def health():
     load_model_internal()
     return jsonify({
-        "status": "ok",
-        "model_loaded": _model_loaded,
-        "demo_mode": False,  # Forced false for production
-        "version": "3.1.0",
+        "status": "ok" if _model else "error",
+        "model_loaded": _model is not None,
+        "load_error": _load_error,
+        "demo_mode": False,
+        "version": "3.1.5",
         "uptime_seconds": time.time() - os.path.getmtime(__file__)
     })
 
