@@ -90,21 +90,8 @@ def load_model_internal():
     try:
         # Standard fix for Keras 3 vs 2 deserialization errors
         
-        # Dummy class to handle Keras 3 DTypePolicy payloads in Keras 2
-        class DummyDTypePolicy:
-            def __init__(self, name="float32", **kwargs):
-                if isinstance(name, dict) and "name" in name:
-                    name = name["name"]
-                self.name = name
-                self.compute_dtype = name
-                self.variable_dtype = name
-            def __str__(self):
-                return self.name
-            def as_list(self):
-                return [self.name]
-
-        # Patch custom objects to intercept the unknown DTypePolicy class
-        custom_objects = {"DTypePolicy": DummyDTypePolicy}
+        # Patch custom objects to intercept Keras 3 layers
+        custom_objects = {}
         
         if _InputLayer is not None:
             # Patch InputLayer for Keras 3 which rejects "batch_shape"
