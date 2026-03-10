@@ -9,7 +9,6 @@ import logging
 import sys
 import traceback
 from datetime import datetime
-import json
 
 # Configure logging
 logging.basicConfig(
@@ -36,57 +35,50 @@ logger.info("="*50)
 logger.info("STARTING DEFECT DETECTION API")
 logger.info("="*50)
 
-# Fix for Keras 3 compatibility - THIS IS THE KEY SOLUTION
+# CRITICAL: Force Keras 2 behavior BEFORE importing tensorflow
+os.environ['TF_USE_LEGACY_KERAS'] = '1'
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+
 try:
     import tensorflow as tf
-    
-    # Force Keras 2 behavior
-    os.environ['TF_USE_LEGACY_KERAS'] = '1'
-    
-    # Now import from tensorflow.keras
+    from tensorflow.keras import layers
     from tensorflow.keras.models import load_model
-    from tensorflow.keras.utils import get_custom_objects
-    from tensorflow.keras.layers import InputLayer
-    from tensorflow.keras import backend as K
     
-    logger.info("✅ TensorFlow imported successfully")
+    logger.info(f"✅ TensorFlow {tf.__version__} imported successfully")
     
-    # CRITICAL FIX: Create a custom InputLayer that handles batch_shape
-    class PatchedInputLayer(InputLayer):
-        """InputLayer that converts batch_shape to batch_input_shape"""
+    # Create custom objects to handle Keras 3 serialization
+    class CompatibleConv2D(layers.Conv2D):
+        """Conv2D that handles Keras 3 dtype policy"""
+        def __init__(self, *args, **kwargs):
+            # Remove dtype policy if present
+            if 'dtype' in kwargs and isinstance(kwargs['dtype'], dict):
+                if 'class_name' in kwargs['dtype'] and kwargs['dtype']['class_name'] == 'DTypePolicy':
+                    kwargs.pop('dtype')
+            super().__init__(*args, **kwargs)
+    
+    class CompatibleInputLayer(layers.InputLayer):
+        """InputLayer that handles batch_shape"""
         def __init__(self, **kwargs):
-            # Convert batch_shape to batch_input_shape if present
             if 'batch_shape' in kwargs:
                 kwargs['batch_input_shape'] = kwargs.pop('batch_shape')
-                logger.info(f"Converted batch_shape to batch_input_shape: {kwargs['batch_input_shape']}")
             super().__init__(**kwargs)
     
-    # Register the custom layer
-    get_custom_objects().update({'InputLayer': PatchedInputLayer})
+    # Comprehensive custom objects dictionary
+    custom_objects = {
+        'InputLayer': CompatibleInputLayer,
+        'Conv2D': CompatibleConv2D,
+        'DTypePolicy': None,  # Ignore DTypePolicy
+        'float32': 'float32',  # Map float32 dtype
+    }
     
-    # Also patch the deserialization directly
-    from tensorflow.keras.layers import deserialize as deserialize_layer
+    # Also add all standard layers to handle any other Keras 3 artifacts
+    for layer_name in dir(layers):
+        if not layer_name.startswith('_') and layer_name[0].isupper():
+            layer_class = getattr(layers, layer_name)
+            if isinstance(layer_class, type) and issubclass(layer_class, layers.Layer):
+                custom_objects[layer_name] = layer_class
     
-    original_deserialize = deserialize_layer
-    
-    def patched_deserialize(config, custom_objects=None):
-        """Patch to handle InputLayer with batch_shape"""
-        if isinstance(config, dict):
-            class_name = config.get('class_name')
-            if class_name == 'InputLayer':
-                config_config = config.get('config', {})
-                if 'batch_shape' in config_config:
-                    config_config['batch_input_shape'] = config_config.pop('batch_shape')
-                    config['config'] = config_config
-                    logger.info("Patched InputLayer config during deserialization")
-        
-        return original_deserialize(config, custom_objects)
-    
-    # Apply the patch
-    import tensorflow.keras.layers
-    tensorflow.keras.layers.deserialize = patched_deserialize
-    
-    logger.info("✅ Applied InputLayer compatibility patches")
+    logger.info("✅ Created compatibility layers")
     
     # Check if model file exists
     logger.info(f"Checking model path: {MODEL_PATH}")
@@ -97,46 +89,59 @@ try:
         logger.info(f"✅ Model file found. Size: {os.path.getsize(MODEL_PATH) / (1024*1024):.2f} MB")
         
         # Load the model with multiple strategies
-        logger.info("Loading model with compatibility fixes...")
         start_time = time.time()
+        load_success = False
         
+        # Strategy 1: Load with custom objects and safe_mode=False
         try:
-            # Strategy 1: Load with custom objects
-            custom_objects = {'InputLayer': PatchedInputLayer}
-            model = load_model(MODEL_PATH, compile=False, custom_objects=custom_objects)
-            logger.info("✅ Model loaded successfully with custom objects")
+            logger.info("Strategy 1: Loading with custom objects and safe_mode=False...")
+            model = load_model(
+                MODEL_PATH, 
+                compile=False, 
+                custom_objects=custom_objects,
+                safe_mode=False
+            )
+            logger.info("✅ Strategy 1 succeeded")
+            load_success = True
         except Exception as e1:
             logger.warning(f"Strategy 1 failed: {e1}")
-            
+        
+        # Strategy 2: Load without compilation
+        if not load_success:
             try:
-                # Strategy 2: Load without compilation and custom objects
+                logger.info("Strategy 2: Loading without compilation...")
                 model = load_model(MODEL_PATH, compile=False)
-                logger.info("✅ Model loaded successfully without custom objects")
+                logger.info("✅ Strategy 2 succeeded")
+                load_success = True
             except Exception as e2:
                 logger.warning(f"Strategy 2 failed: {e2}")
-                
-                try:
-                    # Strategy 3: Load with safe_mode=False
-                    model = load_model(MODEL_PATH, compile=False, safe_mode=False)
-                    logger.info("✅ Model loaded successfully with safe_mode=False")
-                except Exception as e3:
-                    logger.error(f"All loading strategies failed: {e3}")
-                    raise
         
-        load_time = time.time() - start_time
-        model_load_time = datetime.now().isoformat()
+        # Strategy 3: Load with custom objects only
+        if not load_success:
+            try:
+                logger.info("Strategy 3: Loading with custom objects only...")
+                model = load_model(MODEL_PATH, compile=False, custom_objects=custom_objects)
+                logger.info("✅ Strategy 3 succeeded")
+                load_success = True
+            except Exception as e3:
+                logger.warning(f"Strategy 3 failed: {e3}")
         
-        logger.info(f"✅ Model loaded in {load_time:.2f} seconds")
-        logger.info(f"Model input shape: {model.input_shape}")
-        logger.info(f"Model output shape: {model.output_shape}")
-        
-        # Test model with dummy data
-        try:
-            dummy_input = np.zeros((1, DEFAULT_INPUT_SIZE[0], DEFAULT_INPUT_SIZE[1], 3), dtype=np.float32)
-            dummy_output = model.predict(dummy_input, verbose=0)
-            logger.info(f"✅ Model test successful. Output shape: {dummy_output.shape}")
-        except Exception as test_e:
-            logger.warning(f"Model test warning: {test_e}")
+        if load_success:
+            load_time = time.time() - start_time
+            model_load_time = datetime.now().isoformat()
+            logger.info(f"✅ Model loaded in {load_time:.2f} seconds")
+            logger.info(f"Model input shape: {model.input_shape}")
+            logger.info(f"Model output shape: {model.output_shape}")
+            
+            # Test the model
+            try:
+                dummy_input = np.zeros((1, 224, 224, 3), dtype=np.float32)
+                dummy_output = model.predict(dummy_input, verbose=0)
+                logger.info(f"✅ Model test passed. Output shape: {dummy_output.shape}")
+            except Exception as test_e:
+                logger.warning(f"Model test warning: {test_e}")
+        else:
+            model_load_error = "All loading strategies failed"
             
     else:
         logger.error(f"❌ Model file NOT found at: {MODEL_PATH}")
@@ -182,7 +187,7 @@ def home():
     return jsonify({
         'status': 'online',
         'name': 'Defect Detection API',
-        'version': '4.0.0',
+        'version': '5.0.0',
         'model_loaded': model is not None,
         'model_error': model_load_error,
         'model_load_time': model_load_time,
@@ -299,10 +304,7 @@ def debug():
     """Debug endpoint"""
     try:
         files = os.listdir('.')
-        file_info = {}
-        for f in files:
-            if os.path.isfile(f):
-                file_info[f] = os.path.getsize(f)
+        file_info = {f: os.path.getsize(f) for f in files if os.path.isfile(f)}
         
         return jsonify({
             'current_directory': os.getcwd(),
@@ -310,7 +312,8 @@ def debug():
             'model_exists': os.path.exists(MODEL_PATH),
             'model_loaded': model is not None,
             'model_error': model_load_error,
-            'tensorflow_version': tf.__version__ if 'tf' in dir() else None
+            'tensorflow_version': tf.__version__ if 'tf' in dir() else None,
+            'keras_mode': 'legacy' if os.environ.get('TF_USE_LEGACY_KERAS') == '1' else 'normal'
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
