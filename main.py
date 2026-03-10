@@ -35,93 +35,108 @@ logger.info("="*50)
 logger.info("STARTING DEFECT DETECTION API")
 logger.info("="*50)
 
-# Fix for Keras 3 compatibility
-try:
-    # Set environment variables BEFORE importing tensorflow
+# Try different import strategies
+def import_tensorflow():
+    """Try multiple ways to import tensorflow"""
+    
+    # Strategy 1: Set environment variables
     os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-    os.environ['TF_USE_LEGACY_KERAS'] = '1'  # Force Keras 2 behavior
-    os.environ['KERAS_BACKEND'] = 'tensorflow'
+    os.environ['TF_USE_LEGACY_KERAS'] = '1'
     
-    logger.info("Importing TensorFlow with legacy Keras support...")
-    import tensorflow as tf
-    
-    # Limit TensorFlow memory usage
     try:
-        tf.config.threading.set_intra_op_parallelism_threads(1)
-        tf.config.threading.set_inter_op_parallelism_threads(1)
-    except:
-        pass
-    
-    # Import required modules
-    from tensorflow.keras.models import load_model
-    from tensorflow.keras.preprocessing import image
-    
-    # Custom loader to handle batch_shape issue
-    def load_model_with_fixes(model_path):
-        """Custom model loader with compatibility fixes"""
+        # Strategy 1: Direct import
+        import tensorflow as tf
+        from tensorflow.keras.models import load_model
+        from tensorflow.keras.preprocessing import image
+        logger.info("✅ TensorFlow imported directly")
+        return tf, load_model, image
+    except ImportError as e:
+        logger.warning(f"Direct import failed: {e}")
         
-        # Create custom objects to handle InputLayer
-        class CompatibleInputLayer(tf.keras.layers.InputLayer):
-            def __init__(self, **kwargs):
-                # Convert batch_shape to batch_input_shape if present
-                if 'batch_shape' in kwargs:
-                    kwargs['batch_input_shape'] = kwargs.pop('batch_shape')
-                super().__init__(**kwargs)
+        try:
+            # Strategy 2: Try tensorflow-cpu
+            import tensorflow_cpu as tf
+            from tensorflow_cpu.keras.models import load_model
+            from tensorflow_cpu.keras.preprocessing import image
+            logger.info("✅ TensorFlow-CPU imported")
+            return tf, load_model, image
+        except ImportError:
+            logger.warning("TensorFlow-CPU import failed")
+            
+            try:
+                # Strategy 3: Try keras directly
+                import keras
+                from keras.models import load_model
+                from keras.preprocessing import image
+                logger.info("✅ Keras imported directly")
+                return keras, load_model, image
+            except ImportError as e:
+                logger.error(f"All import strategies failed: {e}")
+                return None, None, None
+
+# Import TensorFlow
+tf, load_model, image = import_tensorflow()
+
+if tf is not None:
+    try:
+        # Limit TensorFlow memory usage
+        try:
+            tf.config.threading.set_intra_op_parallelism_threads(1)
+            tf.config.threading.set_inter_op_parallelism_threads(1)
+        except:
+            pass
         
-        custom_objects = {
-            'InputLayer': CompatibleInputLayer,
-            'Functional': tf.keras.models.Model,
-            'Model': tf.keras.models.Model
-        }
+        logger.info(f"Checking model path: {MODEL_PATH}")
+        logger.info(f"Current directory: {os.getcwd()}")
         
-        # Load model with custom objects
-        return load_model(
-            model_path,
-            compile=False,
-            custom_objects=custom_objects,
-            safe_mode=False
-        )
-    
-    logger.info("✅ TensorFlow imported successfully")
-    
-    # Check if model file exists
-    logger.info(f"Checking model path: {MODEL_PATH}")
-    logger.info(f"Current directory: {os.getcwd()}")
-    
-    if os.path.exists(MODEL_PATH):
-        logger.info(f"✅ Model file found. Size: {os.path.getsize(MODEL_PATH) / (1024*1024):.2f} MB")
-        
-        # Load the model with compatibility fixes
-        logger.info("Loading model with compatibility fixes...")
-        start_time = time.time()
-        
-        model = load_model_with_fixes(MODEL_PATH)
-        
-        load_time = time.time() - start_time
-        model_load_time = datetime.now().isoformat()
-        
-        logger.info(f"✅ Model loaded successfully in {load_time:.2f} seconds")
-        logger.info(f"Model input shape: {model.input_shape}")
-        logger.info(f"Model output shape: {model.output_shape}")
-        
-        # Test model with dummy data
-        logger.info("Testing model with dummy data...")
-        dummy_input = np.zeros((1, DEFAULT_INPUT_SIZE[0], DEFAULT_INPUT_SIZE[1], 3), dtype=np.float32)
-        dummy_output = model.predict(dummy_input, verbose=0)
-        logger.info(f"✅ Model test successful. Output shape: {dummy_output.shape}")
-        
-    else:
-        logger.error(f"❌ Model file NOT found at: {MODEL_PATH}")
-        logger.error(f"Directory contents: {os.listdir('.')}")
-        model_load_error = f"Model file not found at {MODEL_PATH}"
-        
-except ImportError as e:
-    logger.error(f"❌ TensorFlow import failed: {str(e)}")
-    model_load_error = f"TensorFlow import failed: {str(e)}"
-except Exception as e:
-    logger.error(f"❌ Model loading failed: {str(e)}")
-    logger.error(traceback.format_exc())
-    model_load_error = f"Model loading failed: {str(e)}"
+        if os.path.exists(MODEL_PATH):
+            logger.info(f"✅ Model file found. Size: {os.path.getsize(MODEL_PATH) / (1024*1024):.2f} MB")
+            
+            # Custom loader to handle batch_shape issue
+            class CompatibleInputLayer:
+                def __init__(self, **kwargs):
+                    if 'batch_shape' in kwargs:
+                        kwargs['batch_input_shape'] = kwargs.pop('batch_shape')
+                    return tf.keras.layers.InputLayer(**kwargs)
+            
+            custom_objects = {
+                'InputLayer': CompatibleInputLayer
+            }
+            
+            # Load the model
+            logger.info("Loading model with compatibility fixes...")
+            start_time = time.time()
+            
+            try:
+                model = load_model(MODEL_PATH, compile=False, custom_objects=custom_objects)
+                load_time = time.time() - start_time
+                model_load_time = datetime.now().isoformat()
+                logger.info(f"✅ Model loaded successfully in {load_time:.2f} seconds")
+            except Exception as e:
+                # Try without custom objects
+                logger.warning(f"Loading with custom objects failed: {e}")
+                logger.info("Trying without custom objects...")
+                model = load_model(MODEL_PATH, compile=False)
+                load_time = time.time() - start_time
+                model_load_time = datetime.now().isoformat()
+                logger.info(f"✅ Model loaded successfully (without custom objects) in {load_time:.2f} seconds")
+            
+            # Test the model
+            logger.info(f"Model input shape: {model.input_shape}")
+            logger.info(f"Model output shape: {model.output_shape}")
+            
+        else:
+            logger.error(f"❌ Model file NOT found at: {MODEL_PATH}")
+            logger.error(f"Directory contents: {os.listdir('.')}")
+            model_load_error = f"Model file not found at {MODEL_PATH}"
+            
+    except Exception as e:
+        logger.error(f"❌ Model loading failed: {str(e)}")
+        logger.error(traceback.format_exc())
+        model_load_error = f"Model loading failed: {str(e)}"
+else:
+    model_load_error = "TensorFlow/Keras not installed. Check requirements.txt"
+    logger.error(model_load_error)
 
 logger.info("="*50)
 
@@ -130,24 +145,20 @@ def preprocess_image(image_bytes):
     try:
         # Open image
         img = Image.open(io.BytesIO(image_bytes))
-        logger.info(f"Original image: mode={img.mode}, size={img.size}")
         
         # Convert to RGB if needed
         if img.mode != 'RGB':
             img = img.convert('RGB')
-            logger.info("Converted to RGB")
         
         # Resize
         img = img.resize(DEFAULT_INPUT_SIZE, Image.Resampling.LANCZOS)
-        logger.info(f"Resized to: {img.size}")
         
         # Convert to array
-        img_array = image.img_to_array(img)
+        img_array = np.array(img, dtype=np.float32)
         img_array = np.expand_dims(img_array, axis=0)
         img_array = img_array / 255.0  # Normalize to [0,1]
         
-        logger.info(f"Final array shape: {img_array.shape}")
-        return img_array.astype(np.float32)
+        return img_array
         
     except Exception as e:
         logger.error(f"Image preprocessing error: {str(e)}")
@@ -159,10 +170,11 @@ def home():
     return jsonify({
         'status': 'online',
         'name': 'Defect Detection API',
-        'version': '2.0.0',
+        'version': '3.0.0',
         'model_loaded': model is not None,
         'model_error': model_load_error,
         'model_load_time': model_load_time,
+        'tensorflow_available': tf is not None,
         'timestamp': datetime.now().isoformat()
     })
 
@@ -212,34 +224,22 @@ def detect():
     try:
         # Read image bytes
         img_bytes = file.read()
-        logger.info(f"Received image: {file.filename}, size: {len(img_bytes)} bytes")
         
         # Preprocess image
         processed_img = preprocess_image(img_bytes)
         
         # Run inference
-        logger.info("Running inference...")
         inference_start = time.time()
-        
         predictions = model.predict(processed_img, verbose=0)
-        
         inference_time = time.time() - inference_start
-        logger.info(f"Inference completed in {inference_time*1000:.2f}ms")
-        logger.info(f"Raw predictions: {predictions}")
         
         # Process predictions based on output shape
         if len(predictions.shape) == 2 and predictions.shape[1] == 1:
-            # Binary classification (sigmoid output)
             defect_prob = float(predictions[0][0])
             normal_prob = 1 - defect_prob
-        elif len(predictions.shape) == 2 and predictions.shape[1] == 2:
-            # Multi-class (softmax output)
-            normal_prob = float(predictions[0][0])
-            defect_prob = float(predictions[0][1])
         else:
-            # Handle other output shapes
-            defect_prob = float(predictions[0][0]) if predictions[0][0] > 0.5 else 0
-            normal_prob = 1 - defect_prob
+            normal_prob = float(predictions[0][0])
+            defect_prob = float(predictions[0][1]) if len(predictions[0]) > 1 else float(predictions[0][0])
         
         # Determine result
         if defect_prob > 0.5:
@@ -265,8 +265,6 @@ def detect():
             'timestamp': datetime.now().isoformat()
         }
         
-        logger.info(f"✅ Prediction: {prediction} (confidence: {response['confidence']}%)")
-        
         # Add CORS headers
         response_json = jsonify(response)
         response_json.headers.add('Access-Control-Allow-Origin', '*')
@@ -274,7 +272,6 @@ def detect():
         
     except Exception as e:
         logger.error(f"Detection failed: {str(e)}")
-        logger.error(traceback.format_exc())
         return jsonify({
             'success': False,
             'error': str(e)
@@ -282,30 +279,16 @@ def detect():
 
 @app.route('/debug', methods=['GET'])
 def debug():
-    """Debug endpoint to check system status"""
+    """Debug endpoint"""
     try:
         files = os.listdir('.')
-        file_details = []
-        for f in files:
-            if os.path.isfile(f):
-                file_details.append({
-                    'name': f,
-                    'size': os.path.getsize(f),
-                    'modified': datetime.fromtimestamp(os.path.getmtime(f)).isoformat()
-                })
-        
         return jsonify({
             'current_directory': os.getcwd(),
-            'files': file_details,
-            'model_path': MODEL_PATH,
+            'files': files,
             'model_exists': os.path.exists(MODEL_PATH),
             'model_loaded': model is not None,
             'model_error': model_load_error,
-            'environment': {
-                'tf_use_legacy_keras': os.environ.get('TF_USE_LEGACY_KERAS'),
-                'keras_backend': os.environ.get('KERAS_BACKEND'),
-                'python_version': sys.version
-            }
+            'tensorflow_available': tf is not None
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
