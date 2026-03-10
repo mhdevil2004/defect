@@ -13,6 +13,8 @@ import threading
 try:
     os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
     # Force Keras 2 if Keras 3 is present
+    os.environ["TF_USE_LEGACY_KERAS"] = "1"
+    os.environ["KERAS_BACKEND"] = "tensorflow"
     import tensorflow as tf
     # Limit memory and CPU usage for Render free tier
     try:
