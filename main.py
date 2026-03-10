@@ -89,7 +89,13 @@ def load_model_internal():
         # Standard fix for Keras 3 vs 2 deserialization errors
         custom_objects = {}
         if _InputLayer is not None:
-            custom_objects["InputLayer"] = _InputLayer
+            # Patch InputLayer for Keras 3 which rejects "batch_shape"
+            class PatchedInputLayer(_InputLayer):
+                def __init__(self, **kwargs):
+                    if "batch_shape" in kwargs:
+                        kwargs["batch_input_shape"] = kwargs.pop("batch_shape")
+                    super().__init__(**kwargs)
+            custom_objects["InputLayer"] = PatchedInputLayer
         
         # Add Functional to handle newer Keras 3 structural requirements
         try:
@@ -208,12 +214,12 @@ def detect():
 
 @app.route("/api/health", methods=["GET"])
 def health():
-    # Only try loading if not already loaded and not currently loading
-    if not _model and not _model_loading:
+    # Only try loading if not already loaded, not currently loading, and if there's no fatal load error blocking it
+    if not _model and not _model_loading and not _load_error:
         threading.Thread(target=load_model_internal, daemon=True).start()
     
     return jsonify({
-        "status": "ready" if _model else ("loading" if _model_loading else "error"),
+        "status": "ready" if _model else ("error" if _load_error else "loading"),
         "model_loaded": _model is not None,
         "is_loading": _model_loading,
         "load_error": _load_error,
