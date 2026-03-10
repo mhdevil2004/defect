@@ -5,261 +5,298 @@ import io
 import time
 import numpy as np
 from PIL import Image
-import uuid
-from datetime import datetime
+import logging
+import sys
 import threading
+from datetime import datetime
+import traceback
 
-# ── TensorFlow / Keras (graceful degradation) ─────────────────────────────────
-try:
-    os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
-    # Force Keras 2 if Keras 3 is present
-    os.environ["TF_USE_LEGACY_KERAS"] = "1"
-    os.environ["KERAS_BACKEND"] = "tensorflow"
-    import tensorflow as tf
-    # Limit memory and CPU usage for Render free tier
-    try:
-        tf.config.threading.set_intra_op_parallelism_threads(1)
-        tf.config.threading.set_inter_op_parallelism_threads(1)
-    except: pass
-
-    _load_model = tf.keras.models.load_model
-    _keras_image = tf.keras.preprocessing.image
-    from tensorflow.keras.layers import InputLayer as _InputLayer
-    _TF_AVAILABLE = True
-except Exception:
-    try:
-        import keras as _k
-        _load_model = _k.models.load_model
-        _keras_image = _k.preprocessing.image
-        from keras.layers import InputLayer as _InputLayer
-        _TF_AVAILABLE = True
-    except Exception:
-        _load_model = None       # type: ignore
-        _keras_image = None      # type: ignore
-        _InputLayer = None       # type: ignore
-        _TF_AVAILABLE = False
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-# Permissive CORS for broad mobile compatibility
-CORS(app) 
-
-@app.route("/")
-def index():
-    return jsonify({
-        "message": "DefectVision API is active",
-        "engine_status": "ready" if _model else ("loading" if _model_loading else "offline"),
-        "version": "4.1.0"
-    }), 200
+# Allow all origins for mobile app compatibility
+CORS(app, origins=["*"], methods=["GET", "POST", "OPTIONS"], allow_headers=["*"])
 
 # Configuration
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "best_model.h5")
 DEFAULT_INPUT_SIZE = (224, 224)
-CLASS_NAMES = ("NORMAL", "DEFECT")
+CLASS_NAMES = ["NORMAL", "DEFECT"]
 
-# Global State
-_model = None
-_model_loading = False
-_model_loaded = False
-_load_error = None
-_state_lock = threading.Lock()
+# Global state
+model = None
+model_loading = False
+model_load_error = None
+model_load_lock = threading.Lock()
 
-def load_model_internal():
-    global _model, _model_loaded, _load_error, _model_loading
-    with _state_lock:
-        if _model_loaded and _model:
-            return _model
-        if _model_loading:
-            return None
-        _model_loading = True
+# TensorFlow/Keras import with fallback
+try:
+    # Suppress TensorFlow warnings
+    os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+    os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
     
-    print(f"[*] Loading model from {MODEL_PATH} (Async)...")
-    if not _TF_AVAILABLE or _load_model is None:
-        _load_error = "TensorFlow/Keras environment not detected. Check requirements.txt and Render logs for installation errors."
-        print(f"[!] {_load_error}")
-        _model_loaded = True
-        _model_loading = False
-        return None
+    import tensorflow as tf
+    
+    # Limit memory growth and CPU threads for Render
+    tf.config.threading.set_intra_op_parallelism_threads(1)
+    tf.config.threading.set_inter_op_parallelism_threads(1)
+    
+    from tensorflow.keras.models import load_model
+    from tensorflow.keras.preprocessing import image
+    
+    logger.info("✓ TensorFlow imported successfully")
+    TF_AVAILABLE = True
+    
+except ImportError as e:
+    logger.error(f"✗ TensorFlow import failed: {e}")
+    TF_AVAILABLE = False
 
-    if not os.path.exists(MODEL_PATH):
-        _load_error = f"Model file missing at {MODEL_PATH}. Current Dir: {os.getcwd()}. Files: {os.listdir('.')}"
-        print(f"[!] {_load_error}")
-        _model_loaded = True
-        _model_loading = False
-        return None
+@app.route('/', methods=['GET'])
+def home():
+    """Root endpoint for health check"""
+    return jsonify({
+        'status': 'online',
+        'message': 'Defect Detection API is running',
+        'model_loaded': model is not None,
+        'model_loading': model_loading,
+        'model_error': model_load_error,
+        'timestamp': datetime.now().isoformat()
+    }), 200
 
+@app.route('/api/health', methods=['GET'])
+def health_check():
+    """Health check endpoint"""
+    return jsonify({
+        'status': 'healthy',
+        'model_status': 'loaded' if model is not None else 'loading' if model_loading else 'error',
+        'error': model_load_error,
+        'timestamp': datetime.now().isoformat()
+    }), 200
+
+def load_model_async():
+    """Load model in background thread"""
+    global model, model_loading, model_load_error
+    
+    with model_load_lock:
+        if model is not None or model_loading:
+            return
+        model_loading = True
+    
+    logger.info("🔄 Starting model loading...")
+    
     try:
-        # Standard fix for Keras 3 vs 2 deserialization errors
+        if not TF_AVAILABLE:
+            model_load_error = "TensorFlow not available"
+            logger.error("✗ TensorFlow not available")
+            return
         
-        # Patch custom objects to intercept Keras 3 layers
-        custom_objects = {}
+        if not os.path.exists(MODEL_PATH):
+            model_load_error = f"Model file not found at {MODEL_PATH}"
+            logger.error(f"✗ {model_load_error}")
+            logger.info(f"Current directory: {os.getcwd()}")
+            logger.info(f"Files: {os.listdir('.')}")
+            return
         
-        if _InputLayer is not None:
-            # Patch InputLayer for Keras 3 which rejects "batch_shape"
-            class PatchedInputLayer(_InputLayer):
-                def __init__(self, **kwargs):
-                    if "batch_shape" in kwargs:
-                        kwargs["batch_input_shape"] = kwargs.pop("batch_shape")
-                    super().__init__(**kwargs)
-            custom_objects["InputLayer"] = PatchedInputLayer
+        logger.info(f"📁 Loading model from: {MODEL_PATH}")
+        start_time = time.time()
         
-        # Add Functional to handle newer Keras 3 structural requirements
-        try:
-            from tensorflow.keras.models import Model
-            custom_objects["Functional"] = Model
-            custom_objects["Model"] = Model
-        except Exception as e:
-            print(f"[*] Note: Could not inject Model/Functional into custom_objects: {e}")
-
-        # Start timer for loading
-        start_t = time.time()
-        # Load without compilation for speed and stability on limited memory
-        _model = _load_model(MODEL_PATH, compile=False, custom_objects=custom_objects)
-        _model_loaded = True
-        _load_error = None
-        duration = round(time.time() - start_t, 2)
-        print(f"[+] Model loaded successfully in {duration}s with comprehensive custom objects.")
+        # Simple model loading without custom objects
+        model = load_model(MODEL_PATH, compile=False)
+        
+        load_time = time.time() - start_time
+        logger.info(f"✓ Model loaded successfully in {load_time:.2f} seconds")
+        logger.info(f"Model input shape: {model.input_shape}")
+        logger.info(f"Model output shape: {model.output_shape}")
+        
+        model_load_error = None
+        
     except Exception as e:
-        _load_error = f"Keras load_model final failure: {str(e)}"
-        print(f"[!] {_load_error}")
-        # Log more detail for OOM or specific Keras errors
-        if "MemoryError" in str(e) or "allocate" in str(e).lower():
-            print("[!] CRITICAL: Memory limit likely reached on Render.")
-        _model = None
-        _model_loaded = False 
+        model_load_error = str(e)
+        logger.error(f"✗ Model loading failed: {e}")
+        logger.error(traceback.format_exc())
+        model = None
+        
     finally:
-        _model_loading = False
-    
-    return _model
+        model_loading = False
 
-def _preprocess(image, target_size):
-    if image.mode != "RGB":
-        image = image.convert("RGB")
-    image = image.resize(target_size, Image.LANCZOS)
-    if _keras_image is not None:
-        arr = _keras_image.img_to_array(image)
-    else:
-        arr = np.array(image, dtype=np.float32)
-    arr = arr / 255.0
-    return np.expand_dims(arr, axis=0)
-
-# Removed _demo_predict to avoid any fake data generation
-
-@app.route("/api/detect", methods=["POST"])
-def detect():
-    if "image" not in request.files:
-        return jsonify({"error": "No image uploaded"}), 400
-    
-    file = request.files["image"]
-    if file.filename == "":
-        return jsonify({"error": "No file selected"}), 400
-
+def preprocess_image(image_file, target_size=DEFAULT_INPUT_SIZE):
+    """Preprocess image for model inference"""
     try:
-        img_bytes = file.read()
-        img = Image.open(io.BytesIO(img_bytes))
+        # Read and convert image
+        img = Image.open(io.BytesIO(image_file.read()))
         
-        if not _model and not _model_loading:
-            threading.Thread(target=load_model_internal, daemon=True).start()
-
-        model = load_model_internal()
-        if model is None:
-            return jsonify({
-                "error": "Engine Starting",
-                "details": "The AI engine is currently initializing in the background. Please wait ~1 minute.",
-                "status": "loading",
-                "demo_mode_disabled": True
-            }), 503
-
-        try:
-            # Flexible input shape detection
-            try:
-                # Try getting shape from model or its first layer
-                in_shape = getattr(model, "input_shape", None)
-                if not in_shape or not isinstance(in_shape, (list, tuple)) or len(in_shape) < 3:
-                     in_shape = model.layers[0].input_shape
-                
-                # Extract W/H (handles [None, H, W, C] or [H, W, C])
-                if len(in_shape) == 4:
-                    target = (in_shape[1], in_shape[2])
-                else:
-                    target = (in_shape[0], in_shape[1])
-                
-                # Final safety check for None values
-                if None in target or not all(isinstance(v, int) for v in target):
-                    target = DEFAULT_INPUT_SIZE
-            except Exception as shape_e:
-                print(f"[*] Fallback to default size: {shape_e}")
-                target = DEFAULT_INPUT_SIZE
-            
-            arr = _preprocess(img, target)
-            print(f"[*] Running inference on shape: {arr.shape}")
-            raw = model.predict(arr, verbose=0)
-            
-            if raw.ndim == 2 and raw.shape[1] == 1:
-                defect_p = float(raw[0, 0])
-                probs = {"NORMAL": round(1 - defect_p, 4), "DEFECT": round(defect_p, 4)}
-            else:
-                probs = {CLASS_NAMES[i]: round(float(raw[0, i]), 4) for i in range(len(CLASS_NAMES))}
-
-            defect_p = probs.get("DEFECT", 0.0)
-            prediction = "defect_detected" if defect_p >= 0.5 else "normal"
-            
-            print(f"[+] Prediction: {prediction} ({probs})")
-            return jsonify({
-                "prediction": prediction,
-                "confidence": round(float(defect_p if prediction == "defect_detected" else probs.get("NORMAL", 1-defect_p)), 2),
-                "status": "success",
-                "timestamp": datetime.now().isoformat()
-            })
-        except Exception as inner_e:
-            print(f"[!] Inner prediction failure: {inner_e}")
-            return jsonify({"error": f"Inference engine failure: {str(inner_e)}"}), 500
-
+        # Convert to RGB if needed
+        if img.mode != 'RGB':
+            img = img.convert('RGB')
+        
+        # Resize image
+        img = img.resize(target_size, Image.Resampling.LANCZOS)
+        
+        # Convert to array and preprocess
+        img_array = image.img_to_array(img)
+        img_array = np.expand_dims(img_array, axis=0)
+        img_array = img_array / 255.0  # Normalize to [0,1]
+        
+        logger.info(f"✓ Image preprocessed: shape={img_array.shape}")
+        return img_array
+        
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        logger.error(f"✗ Image preprocessing failed: {e}")
+        raise
 
-@app.route("/api/health", methods=["GET"])
-def health():
-    # Only try loading if not already loaded, not currently loading, and if there's no fatal load error blocking it
-    if not _model and not _model_loading and not _load_error:
-        threading.Thread(target=load_model_internal, daemon=True).start()
+@app.route('/api/detect', methods=['POST', 'OPTIONS'])
+def detect_defect():
+    """Main detection endpoint"""
+    # Handle preflight request
+    if request.method == 'OPTIONS':
+        return '', 200
     
-    return jsonify({
-        "status": "ready" if _model else ("error" if _load_error else "loading"),
-        "model_loaded": _model is not None,
-        "is_loading": _model_loading,
-        "load_error": _load_error,
-        "demo_mode": False,
-        "version": "4.0.0",
-        "uptime_seconds": time.time() - os.path.getmtime(__file__)
-    })
-
-@app.route("/api/stats", methods=["GET"])
-def stats():
-    return jsonify({
-        "total": 0,
-        "defects": 0,
-        "normal": 0,
-        "defect_rate": 0,
-        "avg_confidence": 0,
-        "avg_latency_ms": 0,
-        "model_loaded": _model is not None,
-        "demo_mode": False,
-        "uptime_seconds": time.time() - os.path.getmtime(__file__),
-        "app_version": "3.2.0",
-        "cpu_percent": 0,
-        "ram_percent": 0
-    })
-
-@app.route("/api/history", methods=["GET", "DELETE"])
-def history():
-    if request.method == "DELETE":
-        return jsonify({"cleared": 0})
-    return jsonify([])
-
-if __name__ == "__main__":
-    # Start loading in background to avoid blocking server start
-    threading.Thread(target=load_model_internal).start()
+    # Check if model is ready
+    if model is None:
+        if model_loading:
+            return jsonify({
+                'success': False,
+                'error': 'Model is still loading. Please try again in a few seconds.',
+                'status': 'loading'
+            }), 503
+        else:
+            # Start loading in background
+            threading.Thread(target=load_model_async, daemon=True).start()
+            return jsonify({
+                'success': False,
+                'error': 'Model is being initialized. Please try again in 30 seconds.',
+                'status': 'initializing'
+            }), 503
     
-    # Use PORT environment variable for Render deployment
-    port = int(os.environ.get("PORT", 8000))
-    app.run(host="0.0.0.0", port=port, debug=False)
+    # Check if image is present
+    if 'image' not in request.files:
+        return jsonify({
+            'success': False,
+            'error': 'No image file provided'
+        }), 400
+    
+    file = request.files['image']
+    
+    if file.filename == '':
+        return jsonify({
+            'success': False,
+            'error': 'Empty filename'
+        }), 400
+    
+    try:
+        # Preprocess image
+        processed_image = preprocess_image(file)
+        
+        # Run inference
+        logger.info("🔍 Running inference...")
+        start_time = time.time()
+        
+        predictions = model.predict(processed_image, verbose=0)
+        
+        inference_time = time.time() - start_time
+        logger.info(f"✓ Inference completed in {inference_time*1000:.2f}ms")
+        
+        # Process predictions
+        if predictions.shape[-1] == 1:
+            # Binary classification with sigmoid
+            defect_prob = float(predictions[0][0])
+            normal_prob = 1 - defect_prob
+            probs = [normal_prob, defect_prob]
+        else:
+            # Multi-class with softmax
+            probs = predictions[0].tolist()
+        
+        # Determine class
+        predicted_class_idx = np.argmax(probs)
+        predicted_class = CLASS_NAMES[predicted_class_idx]
+        confidence = probs[predicted_class_idx]
+        
+        # Format response
+        response = {
+            'success': True,
+            'prediction': 'defect_detected' if predicted_class == 'DEFECT' else 'normal',
+            'confidence': round(confidence * 100, 2),  # Return as percentage
+            'class': predicted_class,
+            'probabilities': {
+                'normal': round(probs[0] * 100, 2),
+                'defect': round(probs[1] * 100, 2)
+            },
+            'inference_time_ms': round(inference_time * 1000, 2),
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        logger.info(f"✓ Prediction: {response['prediction']} (confidence: {response['confidence']}%)")
+        return jsonify(response), 200
+        
+    except Exception as e:
+        logger.error(f"✗ Detection failed: {e}")
+        logger.error(traceback.format_exc())
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+@app.route('/api/model/info', methods=['GET'])
+def model_info():
+    """Get model information"""
+    if model is None:
+        return jsonify({
+            'loaded': False,
+            'loading': model_loading,
+            'error': model_load_error
+        }), 200
+    
+    try:
+        return jsonify({
+            'loaded': True,
+            'loading': False,
+            'input_shape': str(model.input_shape),
+            'output_shape': str(model.output_shape),
+            'classes': CLASS_NAMES,
+            'error': None
+        }), 200
+    except Exception as e:
+        return jsonify({
+            'loaded': True,
+            'error': str(e)
+        }), 200
+
+@app.route('/api/test', methods=['GET'])
+def test_endpoint():
+    """Test endpoint to verify API is working"""
+    return jsonify({
+        'success': True,
+        'message': 'API is working correctly',
+        'model_status': 'loaded' if model is not None else 'loading' if model_loading else 'not loaded',
+        'timestamp': datetime.now().isoformat()
+    }), 200
+
+# Error handlers
+@app.errorhandler(404)
+def not_found(error):
+    return jsonify({'success': False, 'error': 'Endpoint not found'}), 404
+
+@app.errorhandler(500)
+def internal_error(error):
+    return jsonify({'success': False, 'error': 'Internal server error'}), 500
+
+if __name__ == '__main__':
+    # Start model loading in background
+    logger.info("🚀 Starting Defect Detection API...")
+    threading.Thread(target=load_model_async, daemon=True).start()
+    
+    # Get port from environment variable (for Render)
+    port = int(os.environ.get('PORT', 8000))
+    
+    # Run the app
+    app.run(
+        host='0.0.0.0',
+        port=port,
+        debug=False,
+        threaded=True
+    )
