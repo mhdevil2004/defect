@@ -72,19 +72,21 @@ def load_model_internal():
     
     print(f"[*] Loading model from {MODEL_PATH} (Async)...")
     if not _TF_AVAILABLE or _load_model is None:
-        _load_error = "TensorFlow/Keras environment not detected. Check requirements.txt."
+        _load_error = "TensorFlow/Keras environment not detected. Check requirements.txt and Render logs for installation errors."
         print(f"[!] {_load_error}")
         _model_loaded = True
+        _model_loading = False
         return None
 
     if not os.path.exists(MODEL_PATH):
-        _load_error = f"Model file missing at {MODEL_PATH}. Current Dir: {os.getcwd()}"
+        _load_error = f"Model file missing at {MODEL_PATH}. Current Dir: {os.getcwd()}. Files: {os.listdir('.')}"
         print(f"[!] {_load_error}")
         _model_loaded = True
+        _model_loading = False
         return None
 
     try:
-        # standard fix for Keras 3 vs 2 deserialization errors
+        # Standard fix for Keras 3 vs 2 deserialization errors
         custom_objects = {}
         if _InputLayer is not None:
             custom_objects["InputLayer"] = _InputLayer
@@ -94,16 +96,23 @@ def load_model_internal():
             from tensorflow.keras.models import Model
             custom_objects["Functional"] = Model
             custom_objects["Model"] = Model
-        except: pass
+        except Exception as e:
+            print(f"[*] Note: Could not inject Model/Functional into custom_objects: {e}")
 
-        # Load without compilation for speed and stability
+        # Start timer for loading
+        start_t = time.time()
+        # Load without compilation for speed and stability on limited memory
         _model = _load_model(MODEL_PATH, compile=False, custom_objects=custom_objects)
         _model_loaded = True
         _load_error = None
-        print("[+] Model loaded successfully with comprehensive custom objects.")
+        duration = round(time.time() - start_t, 2)
+        print(f"[+] Model loaded successfully in {duration}s with comprehensive custom objects.")
     except Exception as e:
         _load_error = f"Keras load_model final failure: {str(e)}"
         print(f"[!] {_load_error}")
+        # Log more detail for OOM or specific Keras errors
+        if "MemoryError" in str(e) or "allocate" in str(e).lower():
+            print("[!] CRITICAL: Memory limit likely reached on Render.")
         _model = None
         _model_loaded = False 
     finally:
