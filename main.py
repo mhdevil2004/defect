@@ -93,12 +93,17 @@ def load_model_internal():
         # Dummy class to handle Keras 3 DTypePolicy payloads in Keras 2
         class DummyDTypePolicy:
             def __init__(self, name="float32", **kwargs):
+                if isinstance(name, dict) and "name" in name:
+                    name = name["name"]
                 self.name = name
                 self.compute_dtype = name
                 self.variable_dtype = name
             def __str__(self):
                 return self.name
+            def as_list(self):
+                return [self.name]
 
+        # Patch custom objects to intercept the unknown DTypePolicy class
         custom_objects = {"DTypePolicy": DummyDTypePolicy}
         
         if _InputLayer is not None:
